@@ -1,80 +1,84 @@
 import socket
 import threading
 
-class ServidorChat:
-    def __init__(self):
-        # Configuración de conexión (IP local y Puerto 5555)
-        self.host = '127.0.0.1'
-        self.port = 5555
+
+class ChatServer:
+    def __init__(self, host="0.0.0.0", port=5555):
+        self.host = host
+        self.port = port
+        self.clients = []
+        self.nicknames = []
+
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.server.bind((self.host, self.port))
-        self.server.listen()
-        
-        # Diccionarios para guardar quién está en cada sala
-        self.clientes = {}      # {socket: nombre}
-        self.salas = {}         # {nombre_sala: [lista_de_sockets]}
-        self.donde_esta = {}    # {socket: nombre_sala}
-        
-        print(f"[*] Servidor encendido en el puerto {self.port}...")
 
-    def difundir(self, mensaje, sala):
-        """Envía el mensaje solo a las personas de la misma sala."""
-        if sala in self.salas:
-            for cliente in self.salas[sala]:
+    def broadcast(self, message, sender_conn=None):
+        """Envía el mensaje a todos los clientes excepto al remitente."""
+        for client in self.clients:
+            if client != sender_conn:
                 try:
-                    cliente.send(mensaje.encode('utf-8'))
+                    client.send(message)
                 except:
-                    self.cerrar_conexion(cliente)
+                    client.close()
+                    self.remove_client(client)
 
-    def manejar_cliente(self, cliente):
-        """Hilo dedicado para cada usuario conectado."""
+    def handle_client(self, client_conn):
+        """Atiende a un cliente específico en un hilo."""
+        nickname = None
         while True:
             try:
-                mensaje = cliente.recv(1024).decode('utf-8')
-                
-                # Comando para unirse a una sala
-                if mensaje.startswith('/join '):
-                    nueva_sala = mensaje.split(' ')[1]
-                    self.unir_a_sala(cliente, nueva_sala)
-                
-                # Si no es comando, es un mensaje para la sala actual
-                elif cliente in self.donde_esta:
-                    sala_actual = self.donde_esta[cliente]
-                    nombre = self.clientes[cliente]
-                    self.difundir(f"[{nombre}]: {mensaje}", sala_actual)
-                else:
-                    cliente.send("[!] Primero únete a una sala con: /join nombre".encode('utf-8'))
+                message = client_conn.recv(1024)
+                if message:
+                    if nickname is None:
+                        # Primer mensaje es el nickname
+                        nickname = message.decode("utf-8")
+                        self.nicknames.append(nickname)
+                        self.clients.append(client_conn)
+                        print(f"[+] {nickname} conectado")
+                        self.broadcast(
+                            f"{nickname} se ha unido al chat".encode("utf-8"),
+                            client_conn,
+                        )
+                    else:
+                        # Mensaje de chat normal
+                        full_msg = f"{nickname}: {message.decode('utf-8')}".encode(
+                            "utf-8"
+                        )
+                        self.broadcast(full_msg, client_conn)
             except:
+                if nickname:
+                    print(f"[-] {nickname} desconectado")
+                    self.broadcast(
+                        f"{nickname} ha salido del chat".encode("utf-8"), client_conn
+                    )
+                    if nickname in self.nicknames:
+                        self.nicknames.remove(nickname)
+                self.remove_client(client_conn)
                 break
-        self.cerrar_conexion(cliente)
 
-    def unir_a_sala(self, cliente, nombre_sala):
-        # Sacarlo de la sala vieja si ya estaba en una
-        if cliente in self.donde_esta:
-            self.salas[self.donde_esta[cliente]].remove(cliente)
-        
-        # Meterlo a la nueva sala
-        if nombre_sala not in self.salas:
-            self.salas[nombre_sala] = []
-        
-        self.salas[nombre_sala].append(cliente)
-        self.donde_esta[cliente] = nombre_sala
-        cliente.send(f"[*] Te has unido a la sala: {nombre_sala}".encode('utf-8'))
+    def remove_client(self, client_conn):
+        if client_conn in self.clients:
+            self.clients.remove(client_conn)
+        client_conn.close()
 
-    def cerrar_conexion(self, cliente):
-        if cliente in self.clientes:
-            del self.clientes[cliente]
-        cliente.close()
+    def start(self):
+        self.server.listen()
+        print(f"[INFO] Servidor de chat escuchando en {self.host}:{self.port}")
+        try:
+            while True:
+                client_conn, addr = self.server.accept()
+                print(f"[INFO] Conexión entrante desde {addr}")
+                thread = threading.Thread(
+                    target=self.handle_client, args=(client_conn,)
+                )
+                thread.start()
+        except KeyboardInterrupt:
+            print("\n[INFO] Servidor detenido por el usuario.")
+        finally:
+            self.server.close()
 
-    def iniciar(self):
-        while True:
-            cliente, _ = self.server.accept()
-            cliente.send("NICK".encode('utf-8'))
-            nombre = cliente.recv(1024).decode('utf-8')
-            self.clientes[cliente] = nombre
-            
-            # Crear un hilo para este nuevo cliente
-            threading.Thread(target=self.manejar_cliente, args=(cliente,)).start()
 
 if __name__ == "__main__":
-    ServidorChat().iniciar()
+    server = ChatServer()
+    server.start()
